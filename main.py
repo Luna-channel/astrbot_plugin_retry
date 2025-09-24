@@ -19,7 +19,7 @@ from astrbot.api.event import AstrMessageEvent, filter
     "intelligent_retry",
     "木有知 & 长安某 (优化增强版)",
     "当LLM回复为空或包含特定错误关键词时，自动进行多次重试，使用原始请求参数确保完整重试。新增智能截断检测与并发重试功能，简化架构提升性能。",
-    "2.9.9",
+    "2.9.10",
 )
 class IntelligentRetry(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -36,7 +36,7 @@ class IntelligentRetry(Star):
         self._parse_config(config)
 
         logger.info(
-            f"已加载 [IntelligentRetry] 插件 v2.9.8 , "
+            f"已加载 [IntelligentRetry] 插件 v2.9.10 , "
             f"将在LLM回复无效时自动重试 (最多 {self.max_attempts} 次)，使用原始请求参数确保完整的重试。"
             f"截断检测模式: {self.truncation_detection_mode}, 并发重试: {'启用' if self.enable_concurrent_retry else '禁用'}"
         )
@@ -221,17 +221,6 @@ class IntelligentRetry(Star):
             self.request_timestamps.pop(key, None)
             logger.debug(f"清理过期缓存: {key}")
 
-    # ... 这里是 @filter.on_llm_request() ...
-    
-    # --- 在 store_llm_request 之前，添加以下方法 ---
-    async def _safe_get_full_contexts(self, req, event) -> List[Dict[str, Any]]:
-        # ... (方法内容见下一步)
-
-    def _safe_copy_messages(self, messages) -> List[Dict[str, Any]]:
-        # ... (方法内容见下一步)
-
-    def _normalize_message(self, message) -> Dict[str, Any]:
-        # ... (方法内容见下一步)
     async def _safe_get_full_contexts(self, req, event) -> List[Dict[str, Any]]:
         """安全获取完整上下文，多重降级策略"""
         contexts = []
@@ -389,65 +378,6 @@ class IntelligentRetry(Star):
         self._store_request_with_cache_management(request_key, stored_params)
 
         logger.debug(f"已存储LLM请求参数（含{len(full_contexts)}条上下文）: {request_key}")
-
-
-        # 获取图片URL
-        image_urls = [
-            comp.url
-            for comp in event.message_obj.message
-            if isinstance(comp, Comp.Image) and hasattr(comp, "url") and comp.url
-        ]
-
-        # 存储请求参数 - 注意：此时system_prompt已包含完整的人格信息
-        stored_params = {
-            "prompt": req.prompt,
-            "contexts": getattr(req, "contexts", []),
-            "image_urls": image_urls,
-            "system_prompt": getattr(req, "system_prompt", ""),
-            "func_tool": getattr(req, "func_tool", None),
-            "unified_msg_origin": event.unified_msg_origin,
-            "conversation": getattr(req, "conversation", None),
-        }
-        
-        # 显式存储sender信息（第一处修改：存储阶段）
-        stored_params["sender"] = {
-            "user_id": getattr(event.message_obj, "user_id", None),
-            "nickname": getattr(event.message_obj, "nickname", None),
-            "group_id": getattr(event.message_obj, "group_id", None),
-            "platform": getattr(event.message_obj, "platform", None),
-            # 如果有其他sender相关字段也可以在这里添加
-        }
-        
-        # 新增：存储Provider的特定参数（model, temperature, max_tokens等）
-        # 这些参数对于保证重试的一致性至关重要
-        provider_params = {}
-        
-        # 提取常见的Provider参数
-        if hasattr(req, "model"):
-            provider_params["model"] = getattr(req, "model", None)
-        if hasattr(req, "temperature"):
-            provider_params["temperature"] = getattr(req, "temperature", None)
-        if hasattr(req, "max_tokens"):
-            provider_params["max_tokens"] = getattr(req, "max_tokens", None)
-        if hasattr(req, "top_p"):
-            provider_params["top_p"] = getattr(req, "top_p", None)
-        if hasattr(req, "top_k"):
-            provider_params["top_k"] = getattr(req, "top_k", None)
-        if hasattr(req, "frequency_penalty"):
-            provider_params["frequency_penalty"] = getattr(req, "frequency_penalty", None)
-        if hasattr(req, "presence_penalty"):
-            provider_params["presence_penalty"] = getattr(req, "presence_penalty", None)
-        if hasattr(req, "stop"):
-            provider_params["stop"] = getattr(req, "stop", None)
-        if hasattr(req, "stream"):
-            provider_params["stream"] = getattr(req, "stream", None)
-        
-        # 存储Provider参数
-        stored_params["provider_params"] = provider_params
-        
-        self.pending_requests[request_key] = stored_params
-
-        logger.debug(f"已存储LLM请求参数（含完整人格信息和sender信息）: {request_key}")
 
     def _is_truncated(self, text_or_response) -> bool:
         """主入口方法：多层截断检测，支持文本和LLMResponse对象"""
@@ -807,7 +737,7 @@ class IntelligentRetry(Star):
 
         return False
 
-        async def _perform_retry_with_stored_params(
+    async def _perform_retry_with_stored_params(
         self, request_key: str
     ) -> Optional[Any]:
         """使用存储的参数执行重试（改进版：完整上下文恢复）"""
