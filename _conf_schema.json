@@ -1,10 +1,4 @@
 {
-  "enable_truncation_retry": {
-    "description": "启用截断重试",
-    "type": "bool",
-    "hint": "开启后，检测到回复结尾不是常见标点/字母/数字/文件后缀/网址时自动重试（如 Gemini 截断），建议仅在遇到相关问题时开启。",
-    "default": false
-  },
   "max_attempts": {
     "description": "最大重试次数",
     "type": "int",
@@ -16,6 +10,13 @@
     "type": "int",
     "hint": "每次重试之间的等待时间，单位为秒。",
     "default": 2
+  },
+  "retry_delay_mode": {
+    "description": "重试间隔模式",
+    "type": "string",
+    "hint": "选择重试间隔的模式。fixed=每次重试间隔固定，exponential=指数退避（每次翻倍，最大30秒）。",
+    "default": "exponential",
+    "enum": ["fixed", "exponential"]
   },
   "error_keywords": {
     "description": "触发重试的错误关键词",
@@ -35,19 +36,61 @@
     "hint": "当错误文本中包含这些状态码时，将直接跳过重试。留空表示不限制。",
     "default": ""
   },
-
-  "retry_delay_mode": {
-    "description": "重试间隔模式",
-  "type": "string",
-    "hint": "选择重试间隔的模式。fixed=每次重试间隔固定，exponential=指数退避（每次翻倍，最大30秒）。",
-    "default": "exponential",
-    "enum": ["fixed", "exponential"]
-  },
   "fallback_reply": {
     "description": "重试全部失败时的兜底回复",
     "type": "text",
     "hint": "当达到最大重试次数仍失败时，发送给用户的一段友好提示。留空则不发送消息。",
     "default": "抱歉，刚才遇到服务波动，我已自动为你重试多次仍未成功。请稍后再试或换个说法。"
+  },
+
+  "preserve_full_context": {
+    "description": "启用完整上下文重试",
+    "type": "bool",
+    "hint": "开启后，重试时将携带完整的对话历史（受限于压缩和截断设置），解决上下文丢失问题。强烈建议保持开启。",
+    "default": true
+  },
+  "max_context_messages": {
+    "description": "最大历史消息数",
+    "type": "int",
+    "hint": "重试时携带的最大历史消息数量。用于控制内存和API请求大小，防止上下文过长。",
+    "default": 20
+  },
+  "context_compression": {
+    "description": "启用上下文智能压缩",
+    "type": "bool",
+    "hint": "当历史消息超过“最大历史消息数”时，自动压缩上下文，保留系统消息和最近的对话。",
+    "default": true
+  },
+  "min_context_for_retry": {
+    "description": "压缩后最小保留消息数",
+    "type": "int",
+    "hint": "即使启用压缩，也至少会保留这么多条最近的对话，防止上下文被过度压缩。",
+    "default": 5
+  },
+  "max_cache_size": {
+    "description": "最大请求缓存数量",
+    "type": "int",
+    "hint": "插件在内存中缓存待重试请求的最大数量，用于防止内存泄漏。达到上限后将淘汰最旧的请求。",
+    "default": 50
+  },
+  "cache_ttl": {
+    "description": "请求缓存过期时间（秒）",
+    "type": "int",
+    "hint": "缓存中的待重试请求超过此时间后将被自动清理，进一步防止内存占用。",
+    "default": 300
+  },
+  "enable_context_dedup": {
+    "description": "启用上下文去重",
+    "type": "bool",
+    "hint": "在重试时自动去除历史消息中的重复内容，可以略微减少token消耗。",
+    "default": true
+  },
+
+  "enable_truncation_retry": {
+    "description": "启用截断重试",
+    "type": "bool",
+    "hint": "开启后，检测到回复结尾不是常见标点/字母/数字/文件后缀/网址时自动重试（如 Gemini 截断），建议仅在遇到相关问题时开启。",
+    "default": false
   },
   "truncation_detection_mode": {
     "description": "截断检测模式",
