@@ -3,7 +3,13 @@
 import asyncio
 import json
 import re
-from typing import Dict, Any, Optional
+import time
+from typing import Dict, Any, Optional, List, Tuple
+from collections import OrderedDict
+from abc import ABC, abstractmethod
+from copy import deepcopy
+from types import SimpleNamespace
+
 
 import astrbot.api.message_components as Comp
 from astrbot.api import logger, AstrBotConfig
@@ -15,20 +21,24 @@ from astrbot.api.event import AstrMessageEvent, filter
     "intelligent_retry",
     "木有知 & 长安某 (优化增强版)",
     "当LLM回复为空或包含特定错误关键词时，自动进行多次重试，使用原始请求参数确保完整重试。新增智能截断检测与并发重试功能，简化架构提升性能。",
-    "2.9.9",
+    "2.9.10",
 )
 class IntelligentRetry(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
 
-        # 请求存储（借鉴v2版本的设计）
-        self.pending_requests: Dict[str, Dict[str, Any]] = {}
+        # 使用有序字典实现LRU缓存
+        self.pending_requests: OrderedDict[str, Dict[str, Any]] = OrderedDict()
+        self.request_timestamps: Dict[str, float] = {}
+
+        # 创建上下文管理器
+        self.context_manager = ContextManager(config)
 
         # 解析配置
         self._parse_config(config)
 
         logger.info(
-            f"已加载 [IntelligentRetry] 插件 v2.9.8 , "
+            f"已加载 [IntelligentRetry] 插件 v2.9.10 , "
             f"将在LLM回复无效时自动重试 (最多 {self.max_attempts} 次)，使用原始请求参数确保完整的重试。"
             f"截断检测模式: {self.truncation_detection_mode}, 并发重试: {'启用' if self.enable_concurrent_retry else '禁用'}"
         )
@@ -41,6 +51,19 @@ class IntelligentRetry(Star):
         self.retry_delay_mode = (
             config.get("retry_delay_mode", "exponential").lower().strip()
         )
+
+        # 上下文管理配置
+        self.preserve_full_context = bool(config.get("preserve_full_context", True))
+        self.max_context_messages = int(config.get("max_context_messages", 20))
+        self.context_compression = bool(config.get("context_compression", True))
+        self.min_context_for_retry = int(config.get("min_context_for_retry", 5))
+        
+        # 缓存管理配置
+        self.max_cache_size = int(config.get("max_cache_size", 50))
+        self.cache_ttl = int(config.get("cache_ttl", 300))  # 5分钟
+        
+        # 性能优化配置
+        self.enable_context_dedup = bool(config.get("enable_context_dedup", True))
 
         # 错误关键词配置
         default_keywords = (
@@ -170,15 +193,150 @@ class IntelligentRetry(Star):
 
         return f"{session_info}_{message_id}_{content_hash}"
 
+    def _store_request_with_cache_management(self, request_key: str, params: dict):
+        """存储请求并管理缓存"""
+        # 清理过期缓存
+        self._cleanup_expired_cache()
+        
+        # LRU淘汰
+        if len(self.pending_requests) >= self.max_cache_size:
+            # 删除最旧的项
+            oldest_key = next(iter(self.pending_requests))
+            self.pending_requests.pop(oldest_key)
+            self.request_timestamps.pop(oldest_key, None)
+            logger.debug(f"LRU淘汰最旧请求: {oldest_key}")
+            
+        # 存储新请求
+        self.pending_requests[request_key] = params
+        self.request_timestamps[request_key] = time.time()
+        
+    def _cleanup_expired_cache(self):
+        """清理过期的缓存项"""
+        current_time = time.time()
+        expired_keys = [
+            k for k, t in self.request_timestamps.items()
+            if current_time - t > self.cache_ttl
+        ]
+        
+        for key in expired_keys:
+            self.pending_requests.pop(key, None)
+            self.request_timestamps.pop(key, None)
+            logger.debug(f"清理过期缓存: {key}")
+
+    async def _safe_get_full_contexts(self, req, event) -> List[Dict[str, Any]]:
+        """安全获取完整上下文，多重降级策略"""
+        contexts = []
+        
+        # 策略1：从conversation获取
+        try:
+            if hasattr(req, "conversation") and req.conversation:
+                if hasattr(req.conversation, "messages"):
+                    contexts = self._safe_copy_messages(req.conversation.messages)
+                    if contexts:
+                        logger.debug(f"成功从conversation获取{len(contexts)}条历史")
+                        return contexts
+                elif hasattr(req.conversation, "get_messages"):
+                    messages = await req.conversation.get_messages()
+                    contexts = self._safe_copy_messages(messages)
+                    if contexts:
+                        logger.debug(f"成功从conversation.get_messages获取{len(contexts)}条历史")
+                        return contexts
+        except Exception as e:
+            logger.warning(f"从conversation获取上下文失败: {e}")
+            
+        # 策略2：从context获取对话历史
+        try:
+            if hasattr(self.context, "conversation_manager"):
+                conv_mgr = self.context.conversation_manager
+                session_id = event.unified_msg_origin
+                
+                # 1. 先获取当前对话的ID
+                conversation_id = await conv_mgr.get_curr_conversation_id(session_id)
+                if conversation_id:
+                    # 2. 根据ID获取完整的对话对象
+                    conversation = await conv_mgr.get_conversation(session_id, conversation_id)
+                    if conversation and hasattr(conversation, 'history'):
+                        # 3. 解析JSON格式的历史记录
+                        import json
+                        # 确保 history 是字符串类型再解析
+                        if isinstance(conversation.history, str) and conversation.history:
+                            history = json.loads(conversation.history)
+                            if history:
+                                contexts = self._safe_copy_messages(history)
+                                logger.debug(f"从conversation_manager获取{len(contexts)}条历史")
+                                return contexts
+        except Exception as e:
+            logger.warning(f"从conversation_manager获取历史失败: {e}")
+        
+        # 策略3：从req.contexts获取
+        try:
+            if hasattr(req, "contexts") and req.contexts:
+                contexts = self._safe_copy_messages(req.contexts)
+                if contexts:
+                    logger.debug(f"从req.contexts获取{len(contexts)}条历史")
+                    return contexts
+        except Exception as e:
+            logger.warning(f"从req.contexts获取失败: {e}")
+        
+        # 策略4：构造最小上下文
+        try:
+            if hasattr(req, "prompt") and req.prompt:
+                contexts = [{
+                    "role": "user",
+                    "content": str(req.prompt)
+                }]
+                logger.warning("使用最小上下文作为降级方案")
+        except Exception as e:
+            logger.error(f"构造最小上下文失败: {e}")
+            contexts = []
+        
+        return contexts
+
+    def _safe_copy_messages(self, messages) -> List[Dict[str, Any]]:
+        """安全复制消息列表"""
+        if not messages:
+            return []
+        
+        try:
+            if isinstance(messages, list):
+                return [self._normalize_message(m) for m in messages if m]
+            elif hasattr(messages, "__iter__"):
+                return [self._normalize_message(m) for m in messages if m]
+            else:
+                return []
+        except Exception as e:
+            logger.error(f"复制消息失败: {e}")
+            return []
+
+    def _normalize_message(self, message) -> Dict[str, Any]:
+        """标准化消息格式"""
+        try:
+            if isinstance(message, dict):
+                return {
+                    "role": message.get("role", "user"),
+                    "content": str(message.get("content", ""))
+                }
+            elif hasattr(message, "role") and hasattr(message, "content"):
+                return {
+                    "role": getattr(message, "role", "user"),
+                    "content": str(getattr(message, "content", ""))
+                }
+            else:
+                return {"role": "user", "content": str(message)}
+        except Exception as e:
+            logger.error(f"标准化消息失败: {e}")
+            return {"role": "user", "content": ""}
+
     @filter.on_llm_request()
     async def store_llm_request(self, event: AstrMessageEvent, req):
-        """存储LLM请求参数（借鉴v2版本的双钩子机制）"""
-        # 检查类型 - 使用鸭子类型检查而不是isinstance以避免导入问题
+        """存储LLM请求参数（改进版：包含完整上下文管理）"""
+        # 检查类型
         if not hasattr(req, "prompt") or not hasattr(req, "contexts"):
             logger.warning(
                 "store_llm_request: Expected ProviderRequest-like object but got different type"
             )
             return
+            
         request_key = self._get_request_key(event)
 
         # 获取图片URL
@@ -188,56 +346,51 @@ class IntelligentRetry(Star):
             if isinstance(comp, Comp.Image) and hasattr(comp, "url") and comp.url
         ]
 
-        # 存储请求参数 - 注意：此时system_prompt已包含完整的人格信息
+        # 获取完整上下文
+        full_contexts = await self._safe_get_full_contexts(req, event)
+        
+        # 压缩上下文（如果启用）
+        if self.context_compression and len(full_contexts) > self.max_context_messages:
+            full_contexts = self.context_manager.compress_contexts(
+                full_contexts, 
+                self.max_context_messages,
+                self.min_context_for_retry
+            )
+            logger.debug(f"压缩上下文至 {len(full_contexts)} 条消息")
+
+        # 存储请求参数
         stored_params = {
             "prompt": req.prompt,
             "contexts": getattr(req, "contexts", []),
+            "full_contexts": full_contexts,  # 存储完整/压缩后的上下文
             "image_urls": image_urls,
             "system_prompt": getattr(req, "system_prompt", ""),
             "func_tool": getattr(req, "func_tool", None),
             "unified_msg_origin": event.unified_msg_origin,
             "conversation": getattr(req, "conversation", None),
+            "timestamp": time.time(),  # 添加时间戳
         }
         
-        # 显式存储sender信息（第一处修改：存储阶段）
+        # 存储sender信息
         stored_params["sender"] = {
             "user_id": getattr(event.message_obj, "user_id", None),
             "nickname": getattr(event.message_obj, "nickname", None),
             "group_id": getattr(event.message_obj, "group_id", None),
             "platform": getattr(event.message_obj, "platform", None),
-            # 如果有其他sender相关字段也可以在这里添加
         }
         
-        # 新增：存储Provider的特定参数（model, temperature, max_tokens等）
-        # 这些参数对于保证重试的一致性至关重要
-        provider_params = {}
-        
-        # 提取常见的Provider参数
-        if hasattr(req, "model"):
-            provider_params["model"] = getattr(req, "model", None)
-        if hasattr(req, "temperature"):
-            provider_params["temperature"] = getattr(req, "temperature", None)
-        if hasattr(req, "max_tokens"):
-            provider_params["max_tokens"] = getattr(req, "max_tokens", None)
-        if hasattr(req, "top_p"):
-            provider_params["top_p"] = getattr(req, "top_p", None)
-        if hasattr(req, "top_k"):
-            provider_params["top_k"] = getattr(req, "top_k", None)
-        if hasattr(req, "frequency_penalty"):
-            provider_params["frequency_penalty"] = getattr(req, "frequency_penalty", None)
-        if hasattr(req, "presence_penalty"):
-            provider_params["presence_penalty"] = getattr(req, "presence_penalty", None)
-        if hasattr(req, "stop"):
-            provider_params["stop"] = getattr(req, "stop", None)
-        if hasattr(req, "stream"):
-            provider_params["stream"] = getattr(req, "stream", None)
-        
         # 存储Provider参数
+        provider_params = {}
+        for param_name in ["model", "temperature", "max_tokens", "top_p", "top_k", 
+                          "frequency_penalty", "presence_penalty", "stop", "stream"]:
+            if hasattr(req, param_name):
+                provider_params[param_name] = getattr(req, param_name, None)
         stored_params["provider_params"] = provider_params
         
-        self.pending_requests[request_key] = stored_params
+        # 使用缓存管理存储
+        self._store_request_with_cache_management(request_key, stored_params)
 
-        logger.debug(f"已存储LLM请求参数（含完整人格信息和sender信息）: {request_key}")
+        logger.debug(f"已存储LLM请求参数（含{len(full_contexts)}条上下文）: {request_key}")
 
     def _is_truncated(self, text_or_response) -> bool:
         """主入口方法：多层截断检测，支持文本和LLMResponse对象"""
@@ -597,10 +750,8 @@ class IntelligentRetry(Star):
 
         return False
 
-    async def _perform_retry_with_stored_params(
-        self, request_key: str
-    ) -> Optional[Any]:
-        """使用存储的参数执行重试（重构版本：简化sender处理，增加参数验证）"""
+    async def _perform_retry_with_stored_params(self, request_key: str) -> Optional[Any]:
+        """使用存储的参数执行重试（改进版：完整上下文恢复）"""
         if request_key not in self.pending_requests:
             logger.warning(f"未找到存储的请求参数: {request_key}")
             return None
@@ -608,7 +759,6 @@ class IntelligentRetry(Star):
         stored_params = self.pending_requests[request_key]
         
         # === 参数验证阶段 ===
-        # 验证核心参数是否存在
         required_params = ["prompt", "unified_msg_origin"]
         missing_params = [p for p in required_params if p not in stored_params]
         
@@ -638,14 +788,20 @@ class IntelligentRetry(Star):
                 "func_tool": stored_params.get("func_tool", None),
             }
             
+            # === 恢复完整上下文 ===
+            full_contexts = stored_params.get("full_contexts", [])
+            
+            # 如果启用去重，处理重复消息
+            if self.enable_context_dedup and full_contexts:
+                full_contexts = self.context_manager.deduplicate_contexts(full_contexts)
+                logger.debug(f"去重后上下文数量: {len(full_contexts)}")
+            
             # === 鲁棒的 system_prompt 处理逻辑 ===
-            # 核心思路：优先实时获取，失败则回退到存储值
             system_prompt = None
             conversation = stored_params.get("conversation")
 
             if conversation and hasattr(conversation, "persona_id") and conversation.persona_id:
                 try:
-                    # 使用 getattr 解决 Pylance 因类型提示不完整而误报的问题
                     persona_mgr = getattr(self.context, "persona_manager", None)
                     if persona_mgr:
                         persona = await persona_mgr.get_persona(conversation.persona_id)
@@ -667,22 +823,56 @@ class IntelligentRetry(Star):
             if system_prompt:
                 kwargs["system_prompt"] = system_prompt
             
-            # === 简化的sender处理逻辑 ===
-            # 策略：优先使用conversation，其次直接传递sender参数
+            # === 改进的上下文处理逻辑 ===
             conversation = stored_params.get("conversation")
             sender_info = stored_params.get("sender", {})
-            
+
+            if full_contexts:
+                kwargs["contexts"] = full_contexts
+                logger.debug(f"[DEBUG] 重试时: 使用 full_contexts，共 {len(full_contexts)} 条")
+                if len(full_contexts) > 6:
+                    logger.debug(f"[DEBUG] 重试时: 上下文前3条: {full_contexts[:3]}")
+                    logger.debug(f"[DEBUG] 重试时: 上下文后3条: {full_contexts[-3:]}")
+                else:
+                    logger.debug(f"[DEBUG] 重试时: 全部上下文: {full_contexts}")
+            elif "contexts" not in kwargs:
+                kwargs["contexts"] = stored_params.get("contexts", [])
+                logger.debug(f"[DEBUG] 重试时: 使用 stored_params 中的 contexts，共 {len(kwargs['contexts'])} 条")
+
+                
             if conversation:
+                # 如果有conversation对象，更新其消息历史
+                if full_contexts:
+                    try:
+                        if hasattr(conversation, "messages"):
+                            conversation.messages = full_contexts
+                            logger.debug(f"已更新conversation.messages为{len(full_contexts)}条消息")
+                        elif hasattr(conversation, "set_messages"):
+                            await conversation.set_messages(full_contexts)
+                            logger.debug(f"已通过set_messages更新为{len(full_contexts)}条消息")
+                    except Exception as e:
+                        logger.warning(f"更新conversation消息历史失败: {e}")
+                
                 kwargs["conversation"] = conversation
                 
-                # 标准方法：设置sender到conversation
+                # 设置sender信息
                 if sender_info:
                     self._attach_sender_to_conversation(conversation, sender_info)
             else:
-                # 无conversation时，使用contexts
-                kwargs["contexts"] = stored_params.get("contexts", [])
+                # 无conversation时，使用完整的上下文历史
+                kwargs["contexts"] = full_contexts if full_contexts else stored_params.get("contexts", [])
                 
-                # 直接传递sender作为独立参数（某些Provider可能支持）
+                # 确保当前消息在上下文中
+                if kwargs["contexts"] and isinstance(kwargs["contexts"], list):
+                    current_message = {
+                        "role": "user",
+                        "content": stored_params["prompt"]
+                    }
+                    # 检查最后一条消息是否是当前消息
+                    if not kwargs["contexts"] or kwargs["contexts"][-1].get("content") != stored_params["prompt"]:
+                        kwargs["contexts"].append(current_message)
+                
+                # 直接传递sender作为独立参数
                 if sender_info:
                     kwargs["sender"] = sender_info
             
@@ -696,7 +886,8 @@ class IntelligentRetry(Star):
                         logger.debug(f"恢复Provider参数: {param_name}={param_value}")
 
             logger.debug(
-                f"正在执行重试，prompt前50字符: '{stored_params['prompt'][:50]}...'"
+                f"正在执行重试，prompt前50字符: '{stored_params['prompt'][:50]}...'，"
+                f"上下文数量: {len(full_contexts)}"
             )
 
             llm_response = await provider.text_chat(**kwargs)
@@ -705,6 +896,7 @@ class IntelligentRetry(Star):
         except Exception as e:
             logger.error(f"重试调用LLM时发生错误: {e}", exc_info=True)
             return None
+
     
     def _attach_sender_to_conversation(self, conversation, sender_info: dict) -> None:
         """
@@ -1271,8 +1463,69 @@ class IntelligentRetry(Star):
         """插件卸载时清理资源，遵循官方生命周期规范"""
         # 清理存储的请求参数
         self.pending_requests.clear()
+        self.request_timestamps.clear()
         logger.info("已卸载 [IntelligentRetry] 插件并清理所有资源")
 
+
+class ContextManager:
+    """上下文管理器，负责上下文的压缩、去重等操作"""
+    
+    def __init__(self, config: AstrBotConfig):
+        self.config = config
+    
+    def compress_contexts(
+        self, 
+        contexts: List[Dict[str, Any]], 
+        max_messages: int,
+        min_messages: int = 5
+    ) -> List[Dict[str, Any]]:
+        """智能压缩上下文，保留关键信息"""
+        if not contexts or len(contexts) <= max_messages:
+            return contexts
+        
+        # 分离不同类型的消息
+        system_messages = [c for c in contexts if c.get("role") == "system"]
+        user_assistant_messages = [c for c in contexts if c.get("role") in ["user", "assistant"]]
+        
+        # 计算可用空间
+        available_space = max_messages - len(system_messages)
+        
+        if available_space < min_messages:
+            # 如果空间太小，至少保留最近的min_messages条
+            return system_messages + user_assistant_messages[-min_messages:]
+        
+        # 智能选择策略
+        if len(user_assistant_messages) <= available_space:
+            return system_messages + user_assistant_messages
+        
+        # 保留最近的消息
+        recent_count = available_space
+        compressed = system_messages + user_assistant_messages[-recent_count:]
+        
+        logger.debug(f"压缩上下文: {len(contexts)} -> {len(compressed)} 条消息")
+        return compressed
+    
+    def deduplicate_contexts(self, contexts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """去除重复的上下文消息"""
+        if not contexts:
+            return contexts
+        
+        seen = set()
+        deduped = []
+        
+        for msg in contexts:
+            # 创建消息的唯一标识
+            msg_key = f"{msg.get('role', '')}:{msg.get('content', '')}"
+            msg_hash = hash(msg_key)
+            
+            if msg_hash not in seen:
+                seen.add(msg_hash)
+                deduped.append(msg)
+        
+        if len(deduped) < len(contexts):
+            logger.debug(f"去重上下文: {len(contexts)} -> {len(deduped)} 条消息")
+        
+        return deduped
 
 # --- END OF FILE main.py ---
 
