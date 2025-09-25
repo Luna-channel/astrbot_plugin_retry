@@ -7,6 +7,8 @@ import time
 from typing import Dict, Any, Optional, List, Tuple
 from collections import OrderedDict
 from abc import ABC, abstractmethod
+from copy import deepcopy
+from types import SimpleNamespace
 
 
 import astrbot.api.message_components as Comp
@@ -748,9 +750,7 @@ class IntelligentRetry(Star):
 
         return False
 
-    async def _perform_retry_with_stored_params(
-        self, request_key: str
-    ) -> Optional[Any]:
+    async def _perform_retry_with_stored_params(self, request_key: str) -> Optional[Any]:
         """使用存储的参数执行重试（改进版：完整上下文恢复）"""
         if request_key not in self.pending_requests:
             logger.warning(f"未找到存储的请求参数: {request_key}")
@@ -827,11 +827,18 @@ class IntelligentRetry(Star):
             conversation = stored_params.get("conversation")
             sender_info = stored_params.get("sender", {})
 
-            # 新增：无论是否有conversation，都要确保contexts参数包含完整历史
             if full_contexts:
                 kwargs["contexts"] = full_contexts
+                logger.debug(f"[DEBUG] 重试时: 使用 full_contexts，共 {len(full_contexts)} 条")
+                if len(full_contexts) > 6:
+                    logger.debug(f"[DEBUG] 重试时: 上下文前3条: {full_contexts[:3]}")
+                    logger.debug(f"[DEBUG] 重试时: 上下文后3条: {full_contexts[-3:]}")
+                else:
+                    logger.debug(f"[DEBUG] 重试时: 全部上下文: {full_contexts}")
             elif "contexts" not in kwargs:
                 kwargs["contexts"] = stored_params.get("contexts", [])
+                logger.debug(f"[DEBUG] 重试时: 使用 stored_params 中的 contexts，共 {len(kwargs['contexts'])} 条")
+
                 
             if conversation:
                 # 如果有conversation对象，更新其消息历史
