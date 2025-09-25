@@ -671,7 +671,13 @@ class IntelligentRetry(Star):
             # 策略：优先使用conversation，其次直接传递sender参数
             conversation = stored_params.get("conversation")
             sender_info = stored_params.get("sender", {})
-            
+
+            # 新增：无论是否有conversation，都要确保contexts参数包含完整历史
+            if full_contexts:
+                kwargs["contexts"] = full_contexts
+            elif "contexts" not in kwargs:
+                kwargs["contexts"] = stored_params.get("contexts", [])
+                
             if conversation:
                 kwargs["conversation"] = conversation
                 
