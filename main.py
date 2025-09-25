@@ -241,31 +241,30 @@ class IntelligentRetry(Star):
                         return contexts
         except Exception as e:
             logger.warning(f"从conversation获取上下文失败: {e}")
-        
-       # 策略2：从context获取对话历史
-try:
-    if hasattr(self.context, "conversation_manager"):
-        conv_mgr = self.context.conversation_manager
-        session_id = event.unified_msg_origin
-        
-        # 1. 先获取当前对话的ID
-        conversation_id = await conv_mgr.get_curr_conversation_id(session_id)
-        if conversation_id:
-            # 2. 根据ID获取完整的对话对象
-            conversation = await conv_mgr.get_conversation(session_id, conversation_id)
-            if conversation and hasattr(conversation, 'history'):
-                # 3. 解析JSON格式的历史记录
-                import json
-                # 确保 history 是字符串类型再解析
-                if isinstance(conversation.history, str) and conversation.history:
-                    history = json.loads(conversation.history)
-                    if history:
-                        contexts = self._safe_copy_messages(history)
-                        logger.debug(f"从conversation_manager获取{len(contexts)}条历史")
-                        return contexts
-except Exception as e:
-    logger.warning(f"从conversation_manager获取历史失败: {e}")
-
+            
+        # 策略2：从context获取对话历史
+        try:
+            if hasattr(self.context, "conversation_manager"):
+                conv_mgr = self.context.conversation_manager
+                session_id = event.unified_msg_origin
+                
+                # 1. 先获取当前对话的ID
+                conversation_id = await conv_mgr.get_curr_conversation_id(session_id)
+                if conversation_id:
+                    # 2. 根据ID获取完整的对话对象
+                    conversation = await conv_mgr.get_conversation(session_id, conversation_id)
+                    if conversation and hasattr(conversation, 'history'):
+                        # 3. 解析JSON格式的历史记录
+                        import json
+                        # 确保 history 是字符串类型再解析
+                        if isinstance(conversation.history, str) and conversation.history:
+                            history = json.loads(conversation.history)
+                            if history:
+                                contexts = self._safe_copy_messages(history)
+                                logger.debug(f"从conversation_manager获取{len(contexts)}条历史")
+                                return contexts
+        except Exception as e:
+            logger.warning(f"从conversation_manager获取历史失败: {e}")
         
         # 策略3：从req.contexts获取
         try:
