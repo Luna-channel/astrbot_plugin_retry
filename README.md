@@ -1,11 +1,13 @@
-# AstrBot 智能重试插件 (Intelligent Retry)
+# AstrBot 智能重试插件 (Intelligent Retry) - 魔改版
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/Version-2.9.8-blue)](https://github.com/muyouzhi6/astrbot_plugin_retry)
+[![Version](https://img.shields.io/badge/Version-3.0-blue)](https://github.com/Luna-channel/astrbot_plugin_retry)
 
 一个为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 设计的高性能智能重试插件，专门解决大语言模型（LLM）交互中的不稳定问题。通过三层智能检测系统和并发重试机制，显著提升对话体验和响应速度。
 
-**当前版本：v2.9.9** - 🔥 **重要修复**：人格丢失和TTS插件兼容性问题
+**当前版本：v3.0 (魔改版)** - 🔥 **重要修复**：人格丢失和TTS插件兼容性问题
+
+> **⚠️ 魔改版说明**：本版本基于原版进行了优化和修复，主要解决了上下文丢失、人格丢失等关键问题。由 **柯尔** 维护，原作者为 **木有知 & 长安某**。
 
 ## ✨ 核心特性
 
@@ -53,7 +55,7 @@
 ### 方法二：手动安装
 ```bash
 cd /path/to/AstrBot/data/plugins
-git clone https://github.com/muyouzhi6/astrbot_plugin_retry.git
+git clone https://github.com/Luna-channel/astrbot_plugin_retry.git
 # 重启 AstrBot 或在 WebUI 中重载插件
 ```
 
@@ -142,12 +144,13 @@ git clone https://github.com/muyouzhi6/astrbot_plugin_retry.git
 
 ## 📈 版本更新
 
-### v2.9.7 (当前版本)
-✅ 修复人格丢失问题
-✅ 修复TTS插件兼容性
-✅ 优化上下文保持
-✅ 代码风格规范
-🔧 内部优化改进
+### v3.0 (魔改版) - 当前版本
+✅ **修复上下文丢失问题**：完整保存和恢复对话上下文
+✅ **修复人格丢失问题**：重试时正确保持人格设定
+✅ **修复TTS插件兼容性**：正确标记结果类型
+✅ **优化上下文管理**：智能压缩、去重和恢复机制
+✅ **改进参数传递**：使用正确的参数名确保Provider接收上下文
+🔧 **增强会话对象处理**：完整传递conversation对象
 
 ### v2.9.1 
 - ✨ 简化插件架构，移除强制人设和上下文预览等冗余功能
@@ -204,20 +207,43 @@ A: 可以，通过配置不同的检测选项实现精确控制。
 
 ## 🤝 贡献与支持
 
-- 🐛 **问题反馈**：[GitHub Issues](https://github.com/muyouzhi6/astrbot_plugin_retry/issues)
+- 🐛 **问题反馈**：[GitHub Issues](https://github.com/Luna-channel/astrbot_plugin_retry/issues)
 - 🚀 **功能建议**：欢迎提交Pull Request
 - ⭐ **支持项目**：给个Star是最大的鼓励！
 
+## 📌 关于魔改版
+
+本魔改版基于原版进行了关键问题修复和优化，主要解决了：
+- 上下文丢失导致的对话不连贯
+- 人格设定在重试时丢失
+- TTS插件无法识别重试结果
+
+**与原版的区别**：
+- 修复了上下文传递的关键bug（参数名错误）
+- 增强了上下文管理和恢复机制
+- 改进了会话对象的处理方式
+
+如需使用原版，请访问：[原版仓库](https://github.com/muyouzhi6/astrbot_plugin_retry)
+
 ## � 更新日志
 
-### v2.9.7 (2025-09-02) 🔥 重要修复
+### v3.0 (魔改版) - 2025-01-XX 🔥 重要修复
+- ✅ **修复上下文丢失问题**：完整保存和恢复对话上下文，确保重试时不会丢失历史记录
+- ✅ **修复人格丢失问题**：重试时正确保持人格设定，确保角色一致性
+- ✅ **修复TTS插件兼容性**：重试结果正确标记为`LLM_RESULT`类型，TTS插件能正常识别并生成语音
+- ✅ **优化上下文管理**：实现智能上下文压缩、去重和完整恢复机制
+- ✅ **改进参数传递**：使用正确的参数名（`contexts`而非`context`），确保Provider能正确接收上下文
+- ✅ **增强会话对象处理**：完整传递`conversation`对象，提升上下文保持的可靠性
+- 🔧 **代码优化**：统一导入路径，提升插件生态兼容性
+
+### v2.9.7 (原版) - 2025-09-02 🔥 重要修复
 - ✅ **修复人格丢失问题**：重试时现在使用完整的人格信息，确保角色设定在重试过程中不会丢失
 - ✅ **修复TTS插件兼容性**：重试结果现在正确标记为`LLM_RESULT`类型，TTS插件能正常识别并生成语音
 - ✅ **优化上下文保持**：完整保存`conversation`、`system_prompt`等关键参数
 - ✅ **代码风格规范**：通过ruff格式化，符合AstrBot项目规范
 - 🔧 **内部优化**：统一导入路径，提升插件生态兼容性
 
-### v2.9.6 (2024-12-XX)
+### v2.9.6 (原版) - 2024-12-XX
 - 新增智能截断检测与并发重试功能
 - 简化架构移除冗余功能，提升性能
 
@@ -227,9 +253,19 @@ A: 可以，通过配置不同的检测选项实现精确控制。
 
 ## ✍️ 作者
 
-- **原作者**：[@muyouzhi6](https://github.com/muyouzhi6)
-- **优化贡献**：[@长安某](https://github.com/ChanganZhou)
-- **当前版本**：智能检测与并发优化增强版
+- **魔改版维护者**：**柯尔**
+- **原作者**：**木有知 & 长安某**
+- **当前版本**：v3.0 (魔改版) - 智能检测与并发优化增强版
+
+## 🔧 魔改版主要修改
+
+### v3.0 (魔改版)
+- ✅ **修复上下文丢失问题**：完整保存和恢复对话上下文，确保重试时不会丢失历史记录
+- ✅ **修复人格丢失问题**：重试时正确保持人格设定，确保角色一致性
+- ✅ **修复TTS插件兼容性**：重试结果正确标记为`LLM_RESULT`类型，TTS插件能正常识别并生成语音
+- ✅ **优化上下文管理**：实现智能上下文压缩、去重和完整恢复机制
+- ✅ **改进参数传递**：使用正确的参数名（`contexts`而非`context`），确保Provider能正确接收上下文
+- ✅ **增强会话对象处理**：完整传递`conversation`对象，提升上下文保持的可靠性
 
 ---
 
