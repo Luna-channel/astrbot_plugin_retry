@@ -1269,6 +1269,15 @@ class IntelligentRetry(Star):
         request_key = self._get_request_key(event)
         if request_key not in self.pending_requests:
             return
+        
+        # === 增强的工具调用检测 ===
+        # 检测到工具调用时，清理请求参数并直接返回，不进行重试
+        if hasattr(resp, 'tools_call_name') and resp.tools_call_name:
+            logger.debug(f"检测到工具调用响应（工具: {resp.tools_call_name}），清理请求参数，不进行重试")
+            if request_key in self.pending_requests:
+                del self.pending_requests[request_key]
+                self.request_timestamps.pop(request_key, None)
+            return
 
         # 使用现有的响应失败检测逻辑
         # 这里我们需要将LLMResponse转换为类似result的格式来复用现有逻辑
@@ -1395,15 +1404,40 @@ class IntelligentRetry(Star):
             # 已经被LLM响应钩子处理过，直接返回
             return
 
-        # 检查原始LLM响应，如果是工具调用则不干预
+        # === 增强的工具调用检测（多重检测策略）===
+        
+        # 策略1：检查LLMResponse对象中的工具调用标记
+        # 这是最可靠的检测方式，因为它直接来自provider的响应
+        if hasattr(event, 'llm_response_obj'):
+            llm_resp = event.llm_response_obj
+            if hasattr(llm_resp, 'tools_call_name') and llm_resp.tools_call_name:
+                logger.debug(f"检测到工具调用（来自LLMResponse.tools_call_name: {llm_resp.tools_call_name}），不进行干预")
+                if request_key in self.pending_requests:
+                    del self.pending_requests[request_key]
+                    self.request_timestamps.pop(request_key, None)
+                return
+        
+        # 策略2：检查raw_completion中的finish_reason
+        # 兼容OpenAI格式的响应
         llm_response = getattr(event, "llm_response", None)
         if llm_response and hasattr(llm_response, "choices") and llm_response.choices:
             finish_reason = getattr(llm_response.choices[0], "finish_reason", None)
             if finish_reason == "tool_calls":
-                logger.debug("检测到正常的工具调用，不进行干预")
-                # 清理请求参数
+                logger.debug("检测到工具调用（来自finish_reason='tool_calls'），不进行干预")
                 if request_key in self.pending_requests:
                     del self.pending_requests[request_key]
+                    self.request_timestamps.pop(request_key, None)
+                return
+        
+        # 策略3：检查存储的请求参数中是否定义了工具
+        # 如果定义了工具但结果为空，可能是工具正在执行中
+        stored_params = self.pending_requests.get(request_key, {})
+        if stored_params.get("func_tool"):
+            result = event.get_result()
+            # 如果有工具定义且结果为空，可能是工具调用正在处理
+            if not result or not self._has_actual_content(result):
+                logger.debug("检测到请求包含工具定义且结果为空，可能是工具调用正在执行，延迟处理")
+                # 不立即清理，给工具执行一些时间
                 return
 
         result = event.get_result()
@@ -1435,7 +1469,23 @@ class IntelligentRetry(Star):
         # 清理存储的请求参数
         if request_key in self.pending_requests:
             del self.pending_requests[request_key]
+            self.request_timestamps.pop(request_key, None)
             logger.debug(f"结果装饰阶段已清理请求参数: {request_key}")
+    
+    def _has_actual_content(self, result) -> bool:
+        """检查结果是否有实际内容（辅助方法）"""
+        if not result or not hasattr(result, "chain"):
+            return False
+        
+        for comp in result.chain:
+            # 任何非Plain类型的组件都算作有内容
+            if not isinstance(comp, Comp.Plain):
+                return True
+            # Plain类型但有非空文本
+            if hasattr(comp, "text") and str(comp.text).strip():
+                return True
+        
+        return False
 
     async def _cleanup_concurrent_tasks(self, tasks):
         """安全清理并发任务，遵循AstrBot资源管理规范"""
