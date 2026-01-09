@@ -68,8 +68,10 @@ class IntelligentRetry(Star):
         # 错误关键词配置
         default_keywords = (
             "api 返回的内容为空\n"
+            "api 返回的 completion 为空\n"
             "API 返回的 completion 由于内容安全过滤被拒绝(非 AstrBot)\n"
             "调用失败\n"
+            "请求失败\n"
             "[TRUNCATED_BY_LENGTH]\n"
             "达到最大长度限制而被截断"
         )
@@ -695,6 +697,72 @@ class IntelligentRetry(Star):
             pass
         return None
 
+    def _apply_segmentation_to_result(self, event: AstrMessageEvent, result) -> None:
+        """对重试结果应用分段处理
+        
+        当重试在 on_decorating_result 阶段执行时，分段逻辑已经执行过了，
+        需要手动对新结果应用分段处理。
+        """
+        try:
+            # 获取分段配置
+            config = self.context.get_config()
+            seg_config = config.get("platform_settings", {}).get("segmented_reply", {})
+            
+            if not seg_config.get("enable", False):
+                logger.debug("分段回复未启用，跳过分段处理")
+                return
+            
+            # 检查平台限制
+            platform_name = event.get_platform_name()
+            if platform_name in ["qq_official", "weixin_official_account", "dingtalk"]:
+                logger.debug(f"平台 {platform_name} 不支持分段回复")
+                return
+            
+            # 检查是否只对 LLM 结果分段
+            only_llm_result = seg_config.get("only_llm_result", True)
+            if only_llm_result and not result.is_llm_result():
+                logger.debug("only_llm_result 启用但结果非 LLM 结果，跳过分段")
+                return
+            
+            # 获取分段参数
+            words_threshold = int(seg_config.get("words_count_threshold", 150))
+            regex_pattern = seg_config.get("regex", r".*?[。？！~…]+|.+$")
+            cleanup_rule = seg_config.get("content_cleanup_rule", "")
+            
+            # 处理 chain 中的 Plain 组件
+            new_chain = []
+            for comp in result.chain:
+                if isinstance(comp, Comp.Plain):
+                    text = comp.text
+                    
+                    # 如果文本过长，不分段
+                    if len(text) > words_threshold:
+                        new_chain.append(comp)
+                        continue
+                    
+                    # 应用正则分段
+                    segments = re.findall(regex_pattern, text, re.DOTALL | re.MULTILINE)
+                    
+                    if not segments:
+                        new_chain.append(comp)
+                        continue
+                    
+                    # 处理每个分段
+                    for seg in segments:
+                        if cleanup_rule:
+                            seg = re.sub(cleanup_rule, "", seg)
+                        if seg.strip():
+                            new_chain.append(Comp.Plain(text=seg))
+                else:
+                    new_chain.append(comp)
+            
+            if new_chain:
+                result.chain = new_chain
+                logger.debug(f"分段处理完成，共 {len(new_chain)} 个分段")
+            
+        except Exception as e:
+            logger.warning(f"应用分段处理时出错: {e}")
+
     def _should_retry_response(self, result) -> bool:
         """判断是否需要重试（重构后的检测逻辑）"""
         if not result:
@@ -1008,6 +1076,11 @@ class IntelligentRetry(Star):
                     result = MessageEventResult()
                     result.message(new_text)
                     result.result_content_type = ResultContentType.LLM_RESULT
+                    
+                    # 对重试结果应用分段处理（因为在 on_decorating_result 阶段重试时，
+                    # 分段逻辑已经执行过了，需要手动处理）
+                    self._apply_segmentation_to_result(event, result)
+                    
                     event.set_result(result)
                     return True
                 else:
@@ -1199,6 +1272,10 @@ class IntelligentRetry(Star):
                 result = MessageEventResult()
                 result.message(first_valid_result)
                 result.result_content_type = ResultContentType.LLM_RESULT
+                
+                # 对重试结果应用分段处理
+                self._apply_segmentation_to_result(event, result)
+                
                 event.set_result(result)
 
                 # 清理剩余任务 - 遵循官方资源管理规范
@@ -1226,6 +1303,10 @@ class IntelligentRetry(Star):
                 result = MessageEventResult()
                 result.message(first_valid_result)
                 result.result_content_type = ResultContentType.LLM_RESULT
+                
+                # 对重试结果应用分段处理
+                self._apply_segmentation_to_result(event, result)
+                
                 event.set_result(result)
                 logger.info("异常期间获得有效结果，仍然返回成功")
                 return True
