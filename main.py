@@ -37,6 +37,12 @@ class IntelligentRetry(Star):
         # 解析配置
         self._parse_config(config)
 
+        # 好感度标记过滤正则（与 favourpro 插件保持一致）
+        self.favour_block_pattern = re.compile(
+            r"\s*\[(?=[^\]]*(?:Favour|Attitude|Relationship|F\s*:|A\s*:|R\s*:))[^\]]*\]\s*",
+            re.IGNORECASE | re.DOTALL
+        )
+
         logger.info(
             f"已加载 [IntelligentRetry] 插件 v3.0 (魔改版) , "
             f"将在LLM回复无效时自动重试 (最多 {self.max_attempts} 次)，使用原始请求参数确保完整的重试。"
@@ -178,6 +184,15 @@ class IntelligentRetry(Star):
                 except Exception:
                     pass
         return codes
+
+    def _filter_favour_block(self, text: str) -> str:
+        """过滤好感度标记，避免重试结果绕过 favourpro 钩子时标记泄露"""
+        if not text:
+            return text
+        cleaned = self.favour_block_pattern.sub('', text).strip()
+        if cleaned != text:
+            logger.debug("[Retry] 已过滤好感度标记")
+        return cleaned
 
     def _get_request_key(self, event: AstrMessageEvent) -> str:
         """生成稳定的请求唯一标识符，遵循AstrBot事件处理规范"""
@@ -1074,7 +1089,9 @@ class IntelligentRetry(Star):
                     from astrbot.api.event import ResultContentType
 
                     result = MessageEventResult()
-                    result.message(new_text)
+                    # 过滤好感度标记（重试结果绕过了 favourpro 钩子）
+                    filtered_text = self._filter_favour_block(new_text)
+                    result.message(filtered_text)
                     result.result_content_type = ResultContentType.LLM_RESULT
                     
                     # 对重试结果应用分段处理（因为在 on_decorating_result 阶段重试时，
@@ -1270,7 +1287,9 @@ class IntelligentRetry(Star):
                 from astrbot.api.event import ResultContentType
 
                 result = MessageEventResult()
-                result.message(first_valid_result)
+                # 过滤好感度标记（重试结果绕过了 favourpro 钩子）
+                filtered_text = self._filter_favour_block(first_valid_result)
+                result.message(filtered_text)
                 result.result_content_type = ResultContentType.LLM_RESULT
                 
                 # 对重试结果应用分段处理
@@ -1301,7 +1320,9 @@ class IntelligentRetry(Star):
                 from astrbot.api.event import ResultContentType
 
                 result = MessageEventResult()
-                result.message(first_valid_result)
+                # 过滤好感度标记（重试结果绕过了 favourpro 钩子）
+                filtered_text = self._filter_favour_block(first_valid_result)
+                result.message(filtered_text)
                 result.result_content_type = ResultContentType.LLM_RESULT
                 
                 # 对重试结果应用分段处理
@@ -1510,16 +1531,9 @@ class IntelligentRetry(Star):
                     self.request_timestamps.pop(request_key, None)
                 return
         
-        # 策略3：检查存储的请求参数中是否定义了工具
-        # 如果定义了工具但结果为空，可能是工具正在执行中
-        stored_params = self.pending_requests.get(request_key, {})
-        if stored_params.get("func_tool"):
-            result = event.get_result()
-            # 如果有工具定义且结果为空，可能是工具调用正在处理
-            if not result or not self._has_actual_content(result):
-                logger.debug("检测到请求包含工具定义且结果为空，可能是工具调用正在执行，延迟处理")
-                # 不立即清理，给工具执行一些时间
-                return
+        # 策略3已移除：原逻辑"有工具定义且结果为空就跳过"是错误的
+        # API返回空completion是错误情况，需要重试，而非工具调用
+        # 真正的工具调用已由策略1和策略2正确检测
 
         result = event.get_result()
 
