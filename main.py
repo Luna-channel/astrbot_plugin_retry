@@ -310,17 +310,29 @@ class IntelligentRetry(Star):
         return contexts
 
     def _safe_copy_messages(self, messages) -> List[Dict[str, Any]]:
-        """安全复制消息列表"""
+        """安全复制消息列表，过滤工具调用相关消息以避免重试时API报错"""
         if not messages:
             return []
         
         try:
-            if isinstance(messages, list):
-                return [self._normalize_message(m) for m in messages if m]
-            elif hasattr(messages, "__iter__"):
-                return [self._normalize_message(m) for m in messages if m]
-            else:
-                return []
+            result = []
+            items = messages if isinstance(messages, list) else (list(messages) if hasattr(messages, "__iter__") else [])
+            for m in items:
+                if not m:
+                    continue
+                # 获取原始角色
+                raw_role = m.get("role", "") if isinstance(m, dict) else getattr(m, "role", "")
+                # 跳过 tool 角色消息（function_response），避免 Gemini 报 name 为空
+                if raw_role == "tool":
+                    continue
+                # 跳过仅包含工具调用的 assistant 消息（无文本内容）
+                if raw_role == "assistant":
+                    raw_content = m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
+                    has_tool_calls = (m.get("tool_calls") if isinstance(m, dict) else getattr(m, "tool_calls", None))
+                    if has_tool_calls and (not raw_content or str(raw_content).strip() in ("", "None")):
+                        continue
+                result.append(self._normalize_message(m))
+            return result
         except Exception as e:
             logger.error(f"复制消息失败: {e}")
             return []
