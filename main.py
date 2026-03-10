@@ -337,6 +337,25 @@ class IntelligentRetry(Star):
             logger.error(f"复制消息失败: {e}")
             return []
 
+    def _filter_tool_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """过滤掉工具调用相关消息，避免重试时发送残缺的 function_response 给 API"""
+        if not messages:
+            return []
+        filtered = []
+        for m in messages:
+            role = m.get("role", "") if isinstance(m, dict) else getattr(m, "role", "")
+            if role == "tool":
+                continue
+            if role == "assistant":
+                content = m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
+                has_tc = (m.get("tool_calls") if isinstance(m, dict) else getattr(m, "tool_calls", None))
+                if has_tc and (not content or str(content).strip() in ("", "None")):
+                    continue
+            filtered.append(m)
+        if len(filtered) != len(messages):
+            logger.debug(f"过滤工具消息: {len(messages)} -> {len(filtered)}")
+        return filtered
+
     def _normalize_message(self, message) -> Dict[str, Any]:
         """标准化消息格式"""
         try:
@@ -880,11 +899,13 @@ class IntelligentRetry(Star):
             kwargs = {
                 "prompt": stored_params["prompt"],
                 "image_urls": stored_params.get("image_urls", []),
-                "func_tool": stored_params.get("func_tool", None),
             }
             
             # === 恢复完整上下文 ===
             full_contexts = stored_params.get("full_contexts", [])
+            
+            # 运行时过滤工具消息（conversation 对象可能在存储后被框架修改）
+            full_contexts = self._filter_tool_messages(full_contexts)
             
             # 如果启用去重，处理重复消息
             if self.enable_context_dedup and full_contexts:
@@ -936,7 +957,9 @@ class IntelligentRetry(Star):
 
                 
             if conversation:
-                # 如果有conversation对象，更新其消息历史
+                # 清洗 conversation 中可能被框架追加的工具消息
+                if hasattr(conversation, "messages") and conversation.messages:
+                    conversation.messages = self._filter_tool_messages(conversation.messages)
                 if full_contexts:
                     try:
                         if hasattr(conversation, "messages"):
